@@ -1,0 +1,137 @@
+---
+title: "lab 6 part 1"
+author: "Grace Brofman"
+date: "2/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(here)
+library(janitor)
+library(sf)
+library(tmap)
+library(gstat)
+library(stars)
+```
+
+```{r}
+ca_dgw <- read_sf(here("ca_dgw"), layer = "F2013_DBGS_Points_20150720_093252") %>% 
+  clean_names() # use layer = "" to read in entire layer in that folder containing that string
+
+st_crs(ca_dgw) #to check the projection (We see that it's WGS 84)
+
+ca_counties <- read_sf(here("ca_counties"), layer = "ca_counties_TIGER2016") %>% 
+  clean_names() %>% 
+  select(name)
+
+st_crs(ca_counties) # checking projection- the projection is different (EPSG), so use st_transform to transform projection (coordinate reference system) so that it matches the CRS of the other data set
+
+#just overwrite existing dataset
+ca_counties <- st_transform(ca_counties, st_crs(ca_dgw)) #gives it crs of existing (ca_dgw), but could also specify a certain CRS
+
+st_crs(ca_counties) #checking CRS again
+```
+
+```{r}
+# plotting these datasets
+ggplot() +
+  geom_sf(data = ca_counties) +
+  geom_sf(data = ca_dgw, aes(color = dgbs ))
+```
+
+
+using tmap to make an interactive map
+```{r}
+tmap_mode("view") #tmap syntax is a little different than ggplot (so look it up)
+
+tm_shape(ca_dgw) + # naming dataset
+  tm_dots("dgbs") # point plot
+
+
+
+```
+
+```{r}
+#only mapping san joaquin county
+sj_county <- ca_counties %>% 
+  filter(name == "San Joaquin") # this is just a single spatial polygon
+
+#now need to keep only observations within the san joaquin polygon form our dgw dataset (st_intersection)
+
+sj_depth <- ca_dgw %>% 
+  st_intersection(sj_county)
+
+plot(sj_depth)
+plot(sj_county)
+
+ggplot() +
+  geom_sf(data = sj_county) +
+  geom_sf(data = sj_depth,
+          aes(color = dgbs))
+```
+spatial singularity = 2 observations at same location (duplicate) --> wont work for kriging
+```{r}
+#checking for duplicaes
+well_duplicates <- sj_depth %>% 
+  get_dupes(latitude, longitude) #from janitor (can check across all variables, or check specific column(s))
+
+# see that there are 2 duplicates (likely two different wells for each location, but not specified closely enough to account for each individual point)
+
+# removing duplicates
+
+sj_depth <- sj_depth %>% 
+  filter(!local_well %in% well_duplicates$local_well) # don't include the well numbers that exist in the well_duplicates dataframe (keep anything that is not x or y)
+
+sj_depth %>% 
+  get_dupes(latitude, longitude) #no longer any duplicates
+
+```
+
+spatial interpolation:  first create a variogram (a model describing the coleation betwee observations in space based on how far apart they are)
+
+
+### Create a variogram
+```{r}
+sj_dgw_vgm <- variogram(dgbs ~ 1, data = sj_depth)
+
+plot(sj_dgw_vgm) # as the distance in observations increases, there is an increase in semivaraince
+
+sj_dgw_vgm_fit <- fit.variogram(sj_dgw_vgm, model = vgm(nugget = 20, psill = 3000, range = 30, model = "Gau")) #first give actual vgm info, then some starting point info (estimate of range, nugget  and psill, then what type of model you want to use) nugget is measure of semivariance at very small distances. psill is value at which we think theres no further increase in semivariance. range(inflection point) is the distance at which we expect theres no longer a correlation between values at that distance in space
+
+sj_dgw_vgm_fit
+
+plot(sj_dgw_vgm, sj_dgw_vgm_fit) # to see how well mdoel actually fits. overall it looks pretty good, but doesn't quite capture the increase in variance toward the end - but still does a pretty good job overall
+
+```
+
+### Spatial kriging (interpolation)
+
+```{r}
+# make a grid at which we're going to make new calculations 
+
+sj_grid <- st_bbox(sj_county) %>% #find lat/long limmits of sj county polygon
+  st_as_stars(dx = 0.01, dy = 0.01) %>% # make a grid using st_as_stars #difference in x increments to be 0.01, 
+  st_set_crs(4326) %>% 
+  st_crop(sj_county) #crop to sj_county
+
+plot(sj_grid)
+
+```
+
+```{r}
+sj_dgw_krige <- krige(dgbs ~ 1, sj_depth, sj_grid, model = sj_dgw_vgm_fit)
+#(what variable we want to predict, 1(ordinary kriging = constant but unknowg field), actual data tha dgbs comes from, new grid over which were making new predictions, info on how to weight existing points (aka what is the model?) )
+
+plot(sj_dgw_krige)
+# we see that these predictions are in line with what we originally observed in our original data (e.g. high depth to gw in northeast and southwest)
+
+```
+
+
+
+
